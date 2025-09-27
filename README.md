@@ -16,76 +16,49 @@ Modern AI agents and LLM-powered applications often require **dynamic memory** t
 
 ## Idea
 
-MidDB aims to be a **middleware database** that bridges the gap between structured storage and semantic embeddings:
+MidDB is a **middleware database** that bridges the gap between structured storage and semantic embeddings:
 
 - Store structured data (like SQL tables) alongside embeddings for AI memory.  
 - Enable both **structured queries** (field-based lookups) and **semantic queries** (nearest-neighbor embedding search).  
-- Allow dynamic tables and fields, so memory can grow naturally with AI interactions.  
+- Allow dynamic tables and fields, so memory grows naturally with AI interactions.  
 - Serve data via a simple **REST API** for easy integration with AI agents or other services.  
+- Provide **persistent storage** of tables and HNSW indices in the `data/` folder.  
 
 ---
 
 ## MVP (Current Prototype)
 
-The current `MidDB.cpp` is a working prototype with the following features:
+The current `MidDB.cpp` includes:
 
 - **In-memory storage** of tables and records.  
+- **Async inserts**: Inserts are queued and processed by a dedicated worker thread.  
 - **Structured queries** using field filters (`queryField`).  
-- **Semantic queries** using Euclidean distance on embeddings (`queryEmbedding`).  
+- **Semantic queries** using approximate nearest neighbor search via HNSW (`queryEmbedding`).  
 - **Dynamic tables**: Tables are created automatically if they don’t exist.  
-- **REST API** for insertions and queries, running on `localhost:8080`.  
-- **JSON wrapper** for optional persistence (can be extended to save/load data).  
+- **Persistent storage**: Records saved in JSON, HNSW indices saved in `.index` files.  
+- **REST API** running on `localhost:8080`.  
 
-**Limitations of MVP:**
+**Limitations:**
 
-- No persistent storage (data is lost when the server restarts).  
-- Linear search for semantic queries (not optimized for large datasets).  
-- Single-threaded, no concurrency handling.  
-- No hybrid queries combining structured + semantic search.  
+- HNSW index may need optimization for very large datasets.  
+- No hybrid queries combining structured + semantic search yet.  
 - No automatic embedding generation from AI models.  
 
 ---
 
 ## Building MidDB
 
-The roadmap to a full-fledged MidDB includes:
-
-1. **Persistence**
-   - Save/load database in a JSON format (prototype).  
-   - Optionally add binary formats or integrate with SQLite/PostgreSQL.  
-
-2. **Optimized Semantic Search**
-   - Implement HNSW, FAISS, or other ANN algorithms for fast vector search.  
-
-3. **Hybrid Queries**
-   - Combine structured and semantic queries in one request.  
-   - Example: “Find orders by buyers named Alice that are semantically closest to this vector.”  
-
-4. **Dynamic AI Memory**
-   - Integrate LLMs to generate embeddings automatically when inserting new records.  
-   - Support versioned or time-based memory for agents.  
-
-5. **Concurrency & Scaling**
-   - Multi-threaded query handling.  
-   - Optionally split tables across processes or nodes for scale.  
-
-6. **Graph Relationships**
-   - Connect entities with edges to allow reasoning over relationships.  
-
----
-
-## How to Use the MVP
-
 ### Compile
 
 ```bash
-g++ -std=c++17 MidDB.cpp -o MidDB -pthread
+g++ -std=c++17 MidDB.cpp -o MidDB -pthread -I./hnswlib -I.
 ```
 
 ### Run
 ```bash
 ./MidDB
-Server runs at http://localhost:8080.
+# Output:
+# MidDB (production-ready, async inserts, persistent HNSW) running at http://localhost:8080
 ```
 
 ---
@@ -125,13 +98,29 @@ curl -X POST http://localhost:8080/queryEmbedding/users \
 
 ---
 
-### Future Plans
--	•	AI integration: Auto-generate embeddings for inserted data.
--	•	Persistent storage: MidDB files with versioning.
--	•	Hybrid AI queries: Combine structured and semantic search for smarter retrieval.
--	•	Scalability: Multi-threading and optimized indexing for large datasets.
+### Data Storage
+-	•	Records → data/<tableName>.json 
+-   Stores fields, embeddings, and numeric labels.
+-	•	HNSW Index → data/<tableName>.index
+- Used for fast approximate nearest-neighbor searches.
+-	•	Automatic label mapping is rebuilt from JSON on load.
 
 ---
 
-MidDB is a foundation for AI-aware memory systems, bridging structured databases and vector search into a single, extensible platform.
+### Architecture
+-	1.	Client HTTP Request → /insert or /query* endpoints
+-	2.	Insert Queue (async) → Worker thread handles adding records to tables
+-	3.	HNSW Index → Approximate nearest-neighbor search for embeddings
+-	4.	Persistent Storage → JSON + HNSW index files in data/ folder
+-	5.	Query Response → JSON array of matching record IDs
+
+---
+
+### Future Plans
+-	•	Hybrid AI Queries: Combine field-based and embedding-based queries.
+-	•	Automatic Embeddings: Generate embeddings from AI models on insert.
+-	•	Concurrency & Scaling: Multi-threaded inserts, distributed tables.
+-	•	Versioned Persistence: Keep history of updates for records.
+-	•	Graph Relationships: Connect entities to reason over relationships.
+-	•	Cloud/Cluster Support: Scale to multiple nodes or cloud storage.
 
