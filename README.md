@@ -47,6 +47,9 @@ The current `MidDB.cpp` includes:
 ---
 
 ## Building MidDB
+```bash 
+git clone https://github.com/nmslib/hnswlib.git
+```
 
 ### Compile
 
