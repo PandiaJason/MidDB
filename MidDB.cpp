@@ -5,6 +5,7 @@
 #include <string>
 #include <fstream>
 #include <mutex>
+#include <shared_mutex>
 #include <queue>
 #include <condition_variable>
 #include <thread>
@@ -31,8 +32,8 @@ struct Table {
     size_t nextLabel = 0;
     int dim = 0;
 
-    // Structured field index: fieldName -> fieldValue -> [recordIDs]
-    unordered_map<string, unordered_map<string, vector<string>>> fieldIndex;
+    // Structured field index: fieldName -> fieldValue -> set(recordIDs)
+    unordered_map<string, unordered_map<string, unordered_set<string>>> fieldIndex;
 };
 
 // --- MidDB Class ---
@@ -40,11 +41,12 @@ class MidDB {
 private:
     unordered_map<string,Table> tables;
     string storageDir = "data";
-    mutable mutex dbMutex;
+    mutable shared_mutex dbMutex; // for shared read access
 
     // Async insert
     struct InsertTask { string tableName, recordID; unordered_map<string,string> fields; vector<float> embedding; };
     queue<InsertTask> insertQueue;
+    mutex queueMutex;               // only for queue + condition_variable
     condition_variable cv;
     bool stopWorker = false;
     thread workerThread;
@@ -56,7 +58,7 @@ private:
         vector<InsertTask> batch;
         while (true) {
             {
-                unique_lock<mutex> lock(dbMutex);
+                unique_lock<mutex> lock(queueMutex);
                 cv.wait_for(lock, chrono::seconds(5), [&]{ return !insertQueue.empty() || stopWorker; });
                 if (stopWorker && insertQueue.empty()) break;
                 batch.clear();
@@ -71,7 +73,8 @@ private:
     }
 
     void processInsert(const InsertTask &task) {
-        lock_guard<mutex> lock(dbMutex);
+        unique_lock<shared_mutex> lock(dbMutex);
+
         if (tables.find(task.tableName) == tables.end())
             createTable(task.tableName, task.embedding.size());
 
@@ -81,22 +84,35 @@ private:
             table.index.reset(new hnswlib::HierarchicalNSW<float>(space, 20000));
         }
 
-        size_t label = table.nextLabel++;
-        table.records[task.recordID] = {task.fields, task.embedding, label};
+        size_t label;
+        auto recIt = table.records.find(task.recordID);
+        if (recIt != table.records.end()) {
+            // Update existing record (preserve label)
+            label = recIt->second.label;
+            recIt->second.fields = task.fields;
+            recIt->second.embedding = task.embedding;
+        } else {
+            // Insert new record
+            label = table.nextLabel++;
+            table.records[task.recordID] = {task.fields, task.embedding, label};
+        }
         table.labelToID[label] = task.recordID;
 
         // Update structured index
         for (auto &[key,val] : task.fields)
-            table.fieldIndex[key][val].push_back(task.recordID);
+            table.fieldIndex[key][val].insert(task.recordID);
 
+        // Add to HNSW index
         table.index->addPoint(task.embedding.data(), label);
-        cout << "[INFO] Inserted " << task.recordID << " into " << task.tableName << endl;
+
+        cout << "[INFO] Inserted/Updated " << task.recordID << " into " << task.tableName << " (label=" << label << ")\n";
     }
 
     void saveAllTables() {
-        for (auto &[tableName, _] : tables) {
-            saveTable(tableName);
-            saveIndex(tableName);
+        shared_lock<shared_mutex> lock(dbMutex);
+        for (auto &p : tables) {
+            saveTable(p.first);
+            saveIndex(p.first);
         }
     }
 
@@ -111,11 +127,11 @@ public:
 
     ~MidDB() {
         {
-            lock_guard<mutex> lock(dbMutex);
+            lock_guard<mutex> lock(queueMutex);
             stopWorker = true;
         }
         cv.notify_all();
-        workerThread.join();
+        if(workerThread.joinable()) workerThread.join();
     }
 
     void createTable(const string &tableName, int dim = 0) {
@@ -128,27 +144,67 @@ public:
                 const unordered_map<string,string> &fields,
                 const vector<float> &embedding) {
         {
-            lock_guard<mutex> lock(dbMutex);
+            lock_guard<mutex> lock(queueMutex);
             insertQueue.push({tableName, recordID, fields, embedding});
         }
         cv.notify_one();
     }
 
+    void update(const string &tableName, const string &recordID,
+                const unordered_map<string,string> &fields,
+                const vector<float> &embedding) {
+        insert(tableName, recordID, fields, embedding); // upsert via insert
+    }
+
+    void remove(const string &tableName, const string &recordID) {
+        unique_lock<shared_mutex> lock(dbMutex);
+        if (tables.find(tableName) == tables.end()) return;
+        auto &table = tables[tableName];
+        auto it = table.records.find(recordID);
+        if (it == table.records.end()) return;
+
+        size_t label = it->second.label;
+        // Remove from main records
+        table.records.erase(it);
+        table.labelToID.erase(label);
+
+        // Remove from structured index
+        for (auto &[key,val] : it->second.fields) {
+            auto fIt = table.fieldIndex.find(key);
+            if(fIt != table.fieldIndex.end()) {
+                auto vIt = fIt->second.find(val);
+                if(vIt != fIt->second.end()) vIt->second.erase(recordID);
+            }
+        }
+
+        // Soft delete from HNSW (ghost label will exist)
+        if(table.index) table.index->markDelete(label);
+
+        cout << "[INFO] Deleted " << recordID << " from " << tableName << "\n";
+    }
+
     vector<string> queryField(const string &tableName, const string &field, const string &value) const {
         vector<string> result;
-        lock_guard<mutex> lock(dbMutex);
+        shared_lock<shared_mutex> lock(dbMutex);
         if (tables.find(tableName) == tables.end()) return result;
         const auto &table = tables.at(tableName);
-        if (table.fieldIndex.count(field) && table.fieldIndex.at(field).count(value))
-            result = table.fieldIndex.at(field).at(value);
+        auto fit = table.fieldIndex.find(field);
+        if (fit != table.fieldIndex.end()) {
+            auto vit = fit->second.find(value);
+            if (vit != fit->second.end()) {
+                result.reserve(vit->second.size());
+                for (const auto &id : vit->second) result.push_back(id);
+                sort(result.begin(), result.end());
+            }
+        }
         return result;
     }
 
     vector<string> queryEmbedding(const string &tableName, const vector<float> &embedding, int topK=3) const {
         vector<string> result;
-        lock_guard<mutex> lock(dbMutex);
+        shared_lock<shared_mutex> lock(dbMutex);
         if (tables.find(tableName) == tables.end()) return result;
-        auto &table = tables.at(tableName);
+        const auto &table = tables.at(tableName);
         if (!table.index) return result;
 
         auto labels = table.index->searchKnn(embedding.data(), topK);
@@ -207,7 +263,7 @@ public:
             t.records[id] = r;
             t.labelToID[r.label] = id;
             for (auto &[key,val] : r.fields)
-                t.fieldIndex[key][val].push_back(id);
+                t.fieldIndex[key][val].insert(id);
             if (t.dim==0) t.dim = r.embedding.size();
             if (r.label >= t.nextLabel) t.nextLabel = r.label+1;
         }
@@ -224,6 +280,7 @@ int main() {
     MidDB db;
     httplib::Server svr;
 
+    // --- CRUD Endpoints ---
     svr.Post("/insert", [&db](const httplib::Request &req, httplib::Response &res){
         try {
             auto j = json::parse(req.body);
@@ -237,6 +294,31 @@ int main() {
         }
     });
 
+    svr.Post("/update", [&db](const httplib::Request &req, httplib::Response &res){
+        try {
+            auto j = json::parse(req.body);
+            db.update(j["table"], j["id"],
+                      j["fields"].get<unordered_map<string,string>>(),
+                      j["embedding"].get<vector<float>>());
+            res.set_content("{\"status\":\"ok\"}", "application/json");
+        } catch(exception &e){
+            res.status = 400;
+            res.set_content("{\"error\":\""+string(e.what())+"\"}", "application/json");
+        }
+    });
+
+    svr.Post("/delete", [&db](const httplib::Request &req, httplib::Response &res){
+        try {
+            auto j = json::parse(req.body);
+            db.remove(j["table"], j["id"]);
+            res.set_content("{\"status\":\"ok\"}", "application/json");
+        } catch(exception &e){
+            res.status = 400;
+            res.set_content("{\"error\":\""+string(e.what())+"\"}", "application/json");
+        }
+    });
+
+    // --- Query Endpoints ---
     svr.Get(R"(/queryField/(\w+))", [&db](const httplib::Request &req, httplib::Response &res){
         string table = req.matches[1];
         string field = req.get_param_value("field");
@@ -275,6 +357,6 @@ int main() {
         }
     });
 
-    cout << "MidDB (structured index + HNSW + hybrid queries) running at http://localhost:8080\n";
+    cout << "MidDB (structured + semantic + hybrid) running at http://localhost:8080\n";
     svr.listen("0.0.0.0",8080);
 }
