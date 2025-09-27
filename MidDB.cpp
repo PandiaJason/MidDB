@@ -1,129 +1,137 @@
-#include <iostream>
-#include <unordered_map>
-#include <vector>
-#include <string>
-#include <cmath>
-#include <algorithm>
-#include "httplib.h"
-#include "json.hpp"
+# MidDB
 
-using namespace std;
-using json = nlohmann::json;
+**MidDB** is a lightweight, AI-aware hybrid database prototype written in C++. It combines structured data storage with vector embeddings for semantic memory, enabling both traditional queries and AI-driven similarity searches.
 
-// --- Data Structures ---
+---
 
-struct Record {
-    unordered_map<string, string> fields; // structured data
-    vector<float> embedding; // semantic vector
-};
+## Problem
 
-struct Table {
-    unordered_map<string, Record> records; // record_id -> Record
-};
+Modern AI agents and LLM-powered applications often require **dynamic memory** that can store structured information and semantic embeddings together. Existing solutions fall short in several ways:
 
-// MidDB class
-class MidDB {
-private:
-    unordered_map<string, Table> tables; // table_name -> Table
+- SQL databases are great for structured data but cannot handle semantic search efficiently.  
+- Vector databases (like FAISS or Pinecone) handle embeddings but lack structured query capabilities.  
+- AI agents need a **dynamic, hybrid memory** to store, retrieve, and reason over data seamlessly.  
 
-public:
-    // Add a table dynamically
-    void createTable(const string &tableName) {
-        if (tables.find(tableName) == tables.end()) {
-            tables[tableName] = Table();
-        }
-    }
+---
 
-    // Insert a record
-    void insert(const string &tableName, const string &recordID,
-                const unordered_map<string, string> &fields,
-                const vector<float> &embedding) {
-        createTable(tableName);
-        tables[tableName].records[recordID] = {fields, embedding};
-    }
+## Idea
 
-    // Structured query: find records by field value
-    vector<string> queryField(const string &tableName,
-                                        const string &field,
-                                        const string &value) {
-        vector<string> result;
-        if (tables.find(tableName) == tables.end()) return result;
-        for (auto &[id, rec] : tables[tableName].records) {
-            if (rec.fields.find(field) != rec.fields.end() &&
-                rec.fields[field] == value) {
-                result.push_back(id);
-            }
-        }
-        return result;
-    }
+MidDB aims to be a **middleware database** that bridges the gap between structured storage and semantic embeddings:
 
-    // Semantic query: nearest neighbor search
-    vector<string> queryEmbedding(const string &tableName,
-                                            const vector<float> &embedding,
-                                            int topK=3) {
-        struct Score {
-            string id;
-            float dist;
-        };
-        vector<Score> scores;
-        if (tables.find(tableName) == tables.end()) return {};
-        for (auto &[id, rec] : tables[tableName].records) {
-            if (!rec.embedding.empty() && rec.embedding.size() == embedding.size()) {
-                float sum = 0.0f;
-                for (size_t i=0; i<embedding.size(); i++) {
-                    float diff = rec.embedding[i] - embedding[i];
-                    sum += diff * diff;
-                }
-                scores.push_back({id, sqrt(sum)});
-            }
-        }
-        sort(scores.begin(), scores.end(), [](const Score &a, const Score &b){
-            return a.dist < b.dist;
-        });
-        vector<string> result;
-        for (int i=0; i<min(topK,(int)scores.size()); i++) {
-            result.push_back(scores[i].id);
-        }
-        return result;
-    }
-};
+- Store structured data (like SQL tables) alongside embeddings for AI memory.  
+- Enable both **structured queries** (field-based lookups) and **semantic queries** (nearest-neighbor embedding search).  
+- Allow dynamic tables and fields, so memory can grow naturally with AI interactions.  
+- Serve data via a simple **REST API** for easy integration with AI agents or other services.  
 
-// --- Main REST API ---
+---
 
-int main() {
-    MidDB db;
-    httplib::Server svr;
+## MVP (Current Prototype)
 
-    // Insert record
-    svr.Post("/insert", [&db](const httplib::Request& req, httplib::Response& res){
-        auto j = json::parse(req.body);
-        string table = j["table"];
-        string id = j["id"];
-        unordered_map<string, string> fields = j["fields"].get<unordered_map<string,string>>();
-        vector<float> embedding = j["embedding"].get<vector<float>>();
-        db.insert(table, id, fields, embedding);
-        res.set_content("{\"status\":\"ok\"}", "application/json");
-    });
+The current `MidDB.cpp` is a working prototype with the following features:
 
-    // Structured query
-    svr.Get(R"(/queryField/(\w+))", [&db](const httplib::Request& req, httplib::Response& res){
-        string table = req.matches[1];
-        string field = req.get_param_value("field");
-        string value = req.get_param_value("value");
-        auto ids = db.queryField(table, field, value);
-        res.set_content(json(ids).dump(), "application/json");
-    });
+- **In-memory storage** of tables and records.  
+- **Structured queries** using field filters (`queryField`).  
+- **Semantic queries** using Euclidean distance on embeddings (`queryEmbedding`).  
+- **Dynamic tables**: Tables are created automatically if they don’t exist.  
+- **REST API** for insertions and queries, running on `localhost:8080`.  
+- **JSON wrapper** for optional persistence (can be extended to save/load data).  
 
-    // Semantic query
-    svr.Post(R"(/queryEmbedding/(\w+))", [&db](const httplib::Request& req, httplib::Response& res){
-        string table = req.matches[1];
-        auto j = json::parse(req.body);
-        vector<float> embedding = j["embedding"].get<vector<float>>();
-        int topK = j.value("topK", 3);
-        auto ids = db.queryEmbedding(table, embedding, topK);
-        res.set_content(json(ids).dump(), "application/json");
-    });
+**Limitations of MVP:**
 
-    cout << "MidDB server running at http://localhost:8080\n";
-    svr.listen("0.0.0.0", 8080);
-}
+- No persistent storage (data is lost when the server restarts).  
+- Linear search for semantic queries (not optimized for large datasets).  
+- Single-threaded, no concurrency handling.  
+- No hybrid queries combining structured + semantic search.  
+- No automatic embedding generation from AI models.  
+
+---
+
+## Building MidDB
+
+The roadmap to a full-fledged MidDB includes:
+
+1. **Persistence**
+   - Save/load database in a JSON format (prototype).  
+   - Optionally add binary formats or integrate with SQLite/PostgreSQL.  
+
+2. **Optimized Semantic Search**
+   - Implement HNSW, FAISS, or other ANN algorithms for fast vector search.  
+
+3. **Hybrid Queries**
+   - Combine structured and semantic queries in one request.  
+   - Example: “Find orders by buyers named Alice that are semantically closest to this vector.”  
+
+4. **Dynamic AI Memory**
+   - Integrate LLMs to generate embeddings automatically when inserting new records.  
+   - Support versioned or time-based memory for agents.  
+
+5. **Concurrency & Scaling**
+   - Multi-threaded query handling.  
+   - Optionally split tables across processes or nodes for scale.  
+
+6. **Graph Relationships**
+   - Connect entities with edges to allow reasoning over relationships.  
+
+---
+
+## How to Use the MVP
+
+### Compile
+
+```bash
+g++ -std=c++17 MidDB.cpp -o MidDB -pthread
+```
+
+### Run
+```bash
+./MidDB
+Server runs at http://localhost:8080.
+```
+
+---
+
+### Insert a Record
+```bash
+curl -X POST http://localhost:8080/insert \
+-H "Content-Type: application/json" \
+-d '{
+  "table": "users",
+  "id": "user1",
+  "fields": {"name": "Alice", "email": "alice@example.com"},
+  "embedding": [0.1, 0.5, 0.2]
+}'
+```
+
+---
+
+### Structured Query
+```bash
+curl "http://localhost:8080/queryField/users?field=name&value=Alice"
+# Output: ["user1"]
+```
+
+---
+
+### Semantic Query
+```bash
+curl -X POST http://localhost:8080/queryEmbedding/users \
+-H "Content-Type: application/json" \
+-d '{
+  "embedding": [0.1, 0.5, 0.2],
+  "topK": 1
+}'
+# Output: ["user1"]
+```
+
+---
+
+### Future Plans
+-	•	AI integration: Auto-generate embeddings for inserted data.
+-	•	Persistent storage: MidDB files with versioning.
+-	•	Hybrid AI queries: Combine structured and semantic search for smarter retrieval.
+-	•	Scalability: Multi-threading and optimized indexing for large datasets.
+
+---
+
+MidDB is a foundation for AI-aware memory systems, bridging structured databases and vector search into a single, extensible platform.
+
