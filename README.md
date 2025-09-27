@@ -51,11 +51,17 @@ The current `MidDB.cpp` includes:
 git clone https://github.com/nmslib/hnswlib.git
 ```
 
+```bash
+git clone https://github.com/nmslib/hnswlib.git
+```
+
 ### Compile
 
 ```bash
 g++ -std=c++17 MidDB.cpp -o MidDB -pthread -I./hnswlib -I.
 ```
+
+
 
 ### Run
 ```bash
