@@ -52,7 +52,7 @@ git clone https://github.com/nmslib/hnswlib.git
 ```
 
 ```bash
-git clone https://github.com/nmslib/hnswlib.git
+git clone https://github.com/yhirose/cpp-httplib.git
 ```
 
 ### Compile
