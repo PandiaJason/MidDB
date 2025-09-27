@@ -52,7 +52,7 @@ git clone https://github.com/nmslib/hnswlib.git
 ```
 
 ```bash
-git clone https://github.com/yhirose/cpp-httplib.git
+wget https://github.com/nlohmann/json/releases/latest/download/json.hpp -O nlohmann_json.hpp
 ```
 
 ### Compile
